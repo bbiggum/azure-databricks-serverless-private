@@ -23,6 +23,5 @@ venv/
 *.tfstate
 *.tfstate.*
 
-# Screenshots (placeholder only, actual images added manually)
-docs/screenshots/*.png
-!docs/screenshots/.gitkeep
+# Screenshots
+# (actual screenshots are tracked in git)
