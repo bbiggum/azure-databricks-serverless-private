@@ -784,7 +784,7 @@ sudo tail -50 /var/log/nginx/sni-proxy-access.log
 
 > **📸 스크린샷:**
 >
-> ![SNI Proxy 로그 — Storage 미경유 확인](screenshots/10-pe-storage_result.png)
+> ![SNI Proxy 로그 — Storage 미경유 확인](screenshots/10-pe-storage-result.png)
 >
 > *Router VM SNI Proxy 로그 — Storage 트래픽(adlsdbrickstest)은 기록되지 않으며, Domain PE 트래픽(ifconfig.me, pypi.org 등)만 기록됨. Resource PE는 Azure Backbone 직접 연결이므로 고객 VNet을 경유하지 않음을 확인*
 
