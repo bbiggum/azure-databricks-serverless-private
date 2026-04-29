@@ -1,0 +1,1444 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "1729428787562864969"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region for all resources"
+      }
+    },
+    "sshPublicKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "SSH public key for Router VM authentication"
+      }
+    },
+    "adminUsername": {
+      "type": "string",
+      "defaultValue": "azureuser",
+      "metadata": {
+        "description": "VM admin username"
+      }
+    },
+    "adminSourceAddress": {
+      "type": "string",
+      "defaultValue": "10.0.0.0/8",
+      "metadata": {
+        "description": "Admin source IP/CIDR for SSH access to Router VM (e.g., your bastion or VPN range)"
+      }
+    },
+    "databricksWorkspaceName": {
+      "type": "string",
+      "defaultValue": "adb-serverless-test",
+      "metadata": {
+        "description": "Databricks workspace name"
+      }
+    },
+    "deploySecondRouterVm": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Deploy second Router VM for HA"
+      }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_B2s",
+      "metadata": {
+        "description": "Router VM size"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2024-05-01",
+      "name": "vnet-hub",
+      "location": "[parameters('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "10.1.0.0/16"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "AzureFirewallSubnet",
+            "properties": {
+              "addressPrefix": "10.1.0.0/26"
+            }
+          },
+          {
+            "name": "AzureFirewallManagementSubnet",
+            "properties": {
+              "addressPrefix": "10.1.0.64/26"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2024-05-01",
+      "name": "nsg-backend",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "Allow-SSH",
+            "properties": {
+              "priority": 100,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "[parameters('adminSourceAddress')]",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "22"
+            }
+          },
+          {
+            "name": "Allow-AzureLB",
+            "properties": {
+              "priority": 110,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "*",
+              "sourceAddressPrefix": "AzureLoadBalancer",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "*"
+            }
+          },
+          {
+            "name": "Allow-HealthProbe",
+            "properties": {
+              "priority": 120,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "AzureLoadBalancer",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "8082"
+            }
+          },
+          {
+            "name": "Allow-HTTP",
+            "properties": {
+              "priority": 130,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "VirtualNetwork",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "80"
+            }
+          },
+          {
+            "name": "Allow-HTTPS",
+            "properties": {
+              "priority": 140,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "VirtualNetwork",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "443"
+            }
+          },
+          {
+            "name": "Deny-All-Inbound",
+            "properties": {
+              "priority": 4096,
+              "direction": "Inbound",
+              "access": "Deny",
+              "protocol": "*",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "*"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/routeTables",
+      "apiVersion": "2024-05-01",
+      "name": "rt-backend-to-firewall",
+      "location": "[parameters('location')]",
+      "properties": {
+        "disableBgpRoutePropagation": false,
+        "routes": [
+          {
+            "name": "route-to-firewall",
+            "properties": {
+              "addressPrefix": "0.0.0.0/0",
+              "nextHopType": "VirtualAppliance",
+              "nextHopIpAddress": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-firewall'), '2025-04-01').outputs.firewallPrivateIp.value]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'deploy-firewall')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2024-05-01",
+      "name": "vnet-databricks",
+      "location": "[parameters('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "10.0.0.0/16"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "snet-lb-frontend",
+            "properties": {
+              "addressPrefix": "10.0.2.0/26"
+            }
+          },
+          {
+            "name": "snet-lb-backend",
+            "properties": {
+              "addressPrefix": "10.0.2.64/26",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', 'nsg-backend')]"
+              },
+              "routeTable": {
+                "id": "[resourceId('Microsoft.Network/routeTables', 'rt-backend-to-firewall')]"
+              },
+              "privateLinkServiceNetworkPolicies": "Disabled",
+              "privateEndpointNetworkPolicies": "Enabled"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', 'nsg-backend')]",
+        "[resourceId('Microsoft.Network/routeTables', 'rt-backend-to-firewall')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks/virtualNetworkPeerings",
+      "apiVersion": "2024-05-01",
+      "name": "[format('{0}/{1}', 'vnet-databricks', 'peer-databricks-to-hub')]",
+      "properties": {
+        "remoteVirtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-hub')]"
+        },
+        "allowVirtualNetworkAccess": true,
+        "allowForwardedTraffic": true,
+        "allowGatewayTransit": false,
+        "useRemoteGateways": false
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks')]",
+        "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-hub')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks/virtualNetworkPeerings",
+      "apiVersion": "2024-05-01",
+      "name": "[format('{0}/{1}', 'vnet-hub', 'peer-hub-to-databricks')]",
+      "properties": {
+        "remoteVirtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks')]"
+        },
+        "allowVirtualNetworkAccess": true,
+        "allowForwardedTraffic": true,
+        "allowGatewayTransit": false,
+        "useRemoteGateways": false
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks')]",
+        "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-hub')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-firewall",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "firewallSubnetId": {
+            "value": "[reference(resourceId('Microsoft.Network/virtualNetworks', 'vnet-hub'), '2024-05-01').subnets[0].id]"
+          },
+          "firewallMgmtSubnetId": {
+            "value": "[reference(resourceId('Microsoft.Network/virtualNetworks', 'vnet-hub'), '2024-05-01').subnets[1].id]"
+          },
+          "backendSubnetCidr": {
+            "value": "10.0.2.64/26"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.42.1.51946",
+              "templateHash": "540680935440573477"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "firewallSubnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure Firewall Subnet ID"
+              }
+            },
+            "firewallMgmtSubnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure Firewall Management Subnet ID"
+              }
+            },
+            "backendSubnetCidr": {
+              "type": "string",
+              "defaultValue": "10.0.2.64/26",
+              "metadata": {
+                "description": "Backend subnet CIDR for firewall rules source"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/publicIPAddresses",
+              "apiVersion": "2024-05-01",
+              "name": "pip-afw-hub",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard",
+                "tier": "Regional"
+              },
+              "properties": {
+                "publicIPAllocationMethod": "Static",
+                "publicIPAddressVersion": "IPv4"
+              }
+            },
+            {
+              "type": "Microsoft.Network/publicIPAddresses",
+              "apiVersion": "2024-05-01",
+              "name": "pip-afw-hub-mgmt",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard",
+                "tier": "Regional"
+              },
+              "properties": {
+                "publicIPAllocationMethod": "Static",
+                "publicIPAddressVersion": "IPv4"
+              }
+            },
+            {
+              "type": "Microsoft.Network/firewallPolicies",
+              "apiVersion": "2024-05-01",
+              "name": "afwp-hub",
+              "location": "[parameters('location')]",
+              "properties": {
+                "sku": {
+                  "tier": "Standard"
+                },
+                "threatIntelMode": "Alert"
+              }
+            },
+            {
+              "type": "Microsoft.Network/firewallPolicies/ruleCollectionGroups",
+              "apiVersion": "2024-05-01",
+              "name": "[format('{0}/{1}', 'afwp-hub', 'rcg-databricks')]",
+              "properties": {
+                "priority": 100,
+                "ruleCollections": [
+                  {
+                    "ruleCollectionType": "FirewallPolicyFilterRuleCollection",
+                    "name": "rc-databricks-allowed",
+                    "priority": 100,
+                    "action": {
+                      "type": "Allow"
+                    },
+                    "rules": [
+                      {
+                        "ruleType": "ApplicationRule",
+                        "name": "Allow-Microsoft",
+                        "sourceAddresses": [
+                          "[parameters('backendSubnetCidr')]"
+                        ],
+                        "protocols": [
+                          {
+                            "protocolType": "Https",
+                            "port": 443
+                          }
+                        ],
+                        "targetFqdns": [
+                          "*.microsoft.com"
+                        ]
+                      },
+                      {
+                        "ruleType": "ApplicationRule",
+                        "name": "Allow-Azure-Storage",
+                        "sourceAddresses": [
+                          "[parameters('backendSubnetCidr')]"
+                        ],
+                        "protocols": [
+                          {
+                            "protocolType": "Https",
+                            "port": 443
+                          }
+                        ],
+                        "targetFqdns": [
+                          "*.blob.core.windows.net",
+                          "*.dfs.core.windows.net",
+                          "*.table.core.windows.net",
+                          "*.queue.core.windows.net"
+                        ]
+                      },
+                      {
+                        "ruleType": "ApplicationRule",
+                        "name": "Allow-Databricks",
+                        "sourceAddresses": [
+                          "[parameters('backendSubnetCidr')]"
+                        ],
+                        "protocols": [
+                          {
+                            "protocolType": "Https",
+                            "port": 443
+                          }
+                        ],
+                        "targetFqdns": [
+                          "*.azuredatabricks.net"
+                        ]
+                      },
+                      {
+                        "ruleType": "ApplicationRule",
+                        "name": "Allow-AAD",
+                        "sourceAddresses": [
+                          "[parameters('backendSubnetCidr')]"
+                        ],
+                        "protocols": [
+                          {
+                            "protocolType": "Https",
+                            "port": 443
+                          }
+                        ],
+                        "targetFqdns": [
+                          "login.microsoftonline.com",
+                          "graph.microsoft.com"
+                        ]
+                      },
+                      {
+                        "ruleType": "ApplicationRule",
+                        "name": "Allow-ifconfig",
+                        "sourceAddresses": [
+                          "[parameters('backendSubnetCidr')]"
+                        ],
+                        "protocols": [
+                          {
+                            "protocolType": "Https",
+                            "port": 443
+                          },
+                          {
+                            "protocolType": "Http",
+                            "port": 80
+                          }
+                        ],
+                        "targetFqdns": [
+                          "ifconfig.me",
+                          "api.ipify.org",
+                          "ipinfo.io",
+                          "checkip.amazonaws.com",
+                          "httpbin.org"
+                        ],
+                        "description": "IP 확인용 외부 서비스 (테스트 목적)"
+                      }
+                    ]
+                  },
+                  {
+                    "ruleCollectionType": "FirewallPolicyFilterRuleCollection",
+                    "name": "rc-databricks-network",
+                    "priority": 200,
+                    "action": {
+                      "type": "Allow"
+                    },
+                    "rules": [
+                      {
+                        "ruleType": "NetworkRule",
+                        "name": "Allow-SQL",
+                        "sourceAddresses": [
+                          "[parameters('backendSubnetCidr')]"
+                        ],
+                        "destinationAddresses": [
+                          "Sql"
+                        ],
+                        "destinationPorts": [
+                          "1433"
+                        ],
+                        "ipProtocols": [
+                          "TCP"
+                        ]
+                      },
+                      {
+                        "ruleType": "NetworkRule",
+                        "name": "Allow-DNS",
+                        "sourceAddresses": [
+                          "[parameters('backendSubnetCidr')]"
+                        ],
+                        "destinationAddresses": [
+                          "*"
+                        ],
+                        "destinationPorts": [
+                          "53"
+                        ],
+                        "ipProtocols": [
+                          "UDP",
+                          "TCP"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/firewallPolicies', 'afwp-hub')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/azureFirewalls",
+              "apiVersion": "2024-05-01",
+              "name": "afw-hub",
+              "location": "[parameters('location')]",
+              "properties": {
+                "sku": {
+                  "name": "AZFW_VNet",
+                  "tier": "Standard"
+                },
+                "firewallPolicy": {
+                  "id": "[resourceId('Microsoft.Network/firewallPolicies', 'afwp-hub')]"
+                },
+                "ipConfigurations": [
+                  {
+                    "name": "fw-ipconfig",
+                    "properties": {
+                      "publicIPAddress": {
+                        "id": "[resourceId('Microsoft.Network/publicIPAddresses', 'pip-afw-hub')]"
+                      },
+                      "subnet": {
+                        "id": "[parameters('firewallSubnetId')]"
+                      }
+                    }
+                  }
+                ],
+                "managementIpConfiguration": {
+                  "name": "fw-mgmt-ipconfig",
+                  "properties": {
+                    "publicIPAddress": {
+                      "id": "[resourceId('Microsoft.Network/publicIPAddresses', 'pip-afw-hub-mgmt')]"
+                    },
+                    "subnet": {
+                      "id": "[parameters('firewallMgmtSubnetId')]"
+                    }
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/firewallPolicies', 'afwp-hub')]",
+                "[resourceId('Microsoft.Network/publicIPAddresses', 'pip-afw-hub')]",
+                "[resourceId('Microsoft.Network/publicIPAddresses', 'pip-afw-hub-mgmt')]",
+                "[resourceId('Microsoft.Network/firewallPolicies/ruleCollectionGroups', 'afwp-hub', 'rcg-databricks')]"
+              ]
+            },
+            {
+              "type": "Microsoft.OperationalInsights/workspaces",
+              "apiVersion": "2023-09-01",
+              "name": "law-afw-hub",
+              "location": "[parameters('location')]",
+              "properties": {
+                "sku": {
+                  "name": "PerGB2018"
+                },
+                "retentionInDays": 30
+              }
+            },
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.Network/azureFirewalls', 'afw-hub')]",
+              "name": "fw-diagnostics",
+              "properties": {
+                "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', 'law-afw-hub')]",
+                "logAnalyticsDestinationType": "Dedicated",
+                "logs": [
+                  {
+                    "categoryGroup": "allLogs",
+                    "enabled": true
+                  }
+                ],
+                "metrics": [
+                  {
+                    "category": "AllMetrics",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/azureFirewalls', 'afw-hub')]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', 'law-afw-hub')]"
+              ]
+            }
+          ],
+          "outputs": {
+            "firewallPrivateIp": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/azureFirewalls', 'afw-hub'), '2024-05-01').ipConfigurations[0].properties.privateIPAddress]"
+            },
+            "firewallName": {
+              "type": "string",
+              "value": "afw-hub"
+            },
+            "firewallPublicIp": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', 'pip-afw-hub'), '2024-05-01').ipAddress]"
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.OperationalInsights/workspaces', 'law-afw-hub')]"
+            },
+            "firewallPolicyName": {
+              "type": "string",
+              "value": "afwp-hub"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-hub')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-loadbalancer",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "frontendSubnetId": {
+            "value": "[reference(resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks'), '2024-05-01').subnets[0].id]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.42.1.51946",
+              "templateHash": "7554637552855490659"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "frontendSubnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Frontend subnet ID (snet-lb-frontend)"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/loadBalancers",
+              "apiVersion": "2024-05-01",
+              "name": "lb-databricks-internal",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard",
+                "tier": "Regional"
+              },
+              "properties": {
+                "frontendIPConfigurations": [
+                  {
+                    "name": "fe-databricks",
+                    "properties": {
+                      "privateIPAllocationMethod": "Dynamic",
+                      "subnet": {
+                        "id": "[parameters('frontendSubnetId')]"
+                      }
+                    }
+                  }
+                ],
+                "backendAddressPools": [
+                  {
+                    "name": "be-router-pool"
+                  }
+                ],
+                "probes": [
+                  {
+                    "name": "hp-router-8082",
+                    "properties": {
+                      "protocol": "Http",
+                      "port": 8082,
+                      "requestPath": "/",
+                      "intervalInSeconds": 5,
+                      "numberOfProbes": 2
+                    }
+                  }
+                ],
+                "loadBalancingRules": [
+                  {
+                    "name": "rule-ha-ports",
+                    "properties": {
+                      "frontendIPConfiguration": {
+                        "id": "[resourceId('Microsoft.Network/loadBalancers/frontendIPConfigurations', 'lb-databricks-internal', 'fe-databricks')]"
+                      },
+                      "backendAddressPool": {
+                        "id": "[resourceId('Microsoft.Network/loadBalancers/backendAddressPools', 'lb-databricks-internal', 'be-router-pool')]"
+                      },
+                      "probe": {
+                        "id": "[resourceId('Microsoft.Network/loadBalancers/probes', 'lb-databricks-internal', 'hp-router-8082')]"
+                      },
+                      "protocol": "All",
+                      "frontendPort": 0,
+                      "backendPort": 0,
+                      "enableFloatingIP": false,
+                      "enableTcpReset": true,
+                      "idleTimeoutInMinutes": 4,
+                      "loadDistribution": "Default"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "outputs": {
+            "lbId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/loadBalancers', 'lb-databricks-internal')]"
+            },
+            "lbName": {
+              "type": "string",
+              "value": "lb-databricks-internal"
+            },
+            "frontendIpConfigId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/loadBalancers', 'lb-databricks-internal'), '2024-05-01').frontendIPConfigurations[0].id]"
+            },
+            "backendPoolId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/loadBalancers', 'lb-databricks-internal'), '2024-05-01').backendAddressPools[0].id]"
+            },
+            "backendPoolName": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/loadBalancers', 'lb-databricks-internal'), '2024-05-01').backendAddressPools[0].name]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-router-vm-01",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "subnetId": {
+            "value": "[reference(resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks'), '2024-05-01').subnets[1].id]"
+          },
+          "lbBackendPoolId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-loadbalancer'), '2025-04-01').outputs.backendPoolId.value]"
+          },
+          "adminUsername": {
+            "value": "[parameters('adminUsername')]"
+          },
+          "sshPublicKey": {
+            "value": "[parameters('sshPublicKey')]"
+          },
+          "vmSuffix": {
+            "value": "01"
+          },
+          "availabilityZone": {
+            "value": "1"
+          },
+          "vmSize": {
+            "value": "[parameters('vmSize')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.42.1.51946",
+              "templateHash": "16494112817780093260"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "subnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Backend subnet ID"
+              }
+            },
+            "lbBackendPoolId": {
+              "type": "string",
+              "metadata": {
+                "description": "Load Balancer backend pool ID"
+              }
+            },
+            "adminUsername": {
+              "type": "string",
+              "defaultValue": "azureuser",
+              "metadata": {
+                "description": "VM admin username"
+              }
+            },
+            "sshPublicKey": {
+              "type": "securestring",
+              "metadata": {
+                "description": "SSH public key"
+              }
+            },
+            "vmSuffix": {
+              "type": "string",
+              "defaultValue": "01",
+              "metadata": {
+                "description": "VM name suffix (e.g., 01, 02)"
+              }
+            },
+            "availabilityZone": {
+              "type": "string",
+              "defaultValue": "1",
+              "metadata": {
+                "description": "Availability zone"
+              }
+            },
+            "vmSize": {
+              "type": "string",
+              "defaultValue": "Standard_B2s",
+              "metadata": {
+                "description": "VM size"
+              }
+            }
+          },
+          "variables": {
+            "vmName": "[format('vm-router-{0}', parameters('vmSuffix'))]",
+            "nicName": "[format('{0}-nic', variables('vmName'))]",
+            "cloudInitScript": "#cloud-config\npackage_update: true\npackage_upgrade: true\n\npackages:\n  - nginx\n  - iptables-persistent\n  - net-tools\n  - tcpdump\n  - conntrack\n\nwrite_files:\n  - path: /etc/sysctl.d/99-ip-forward.conf\n    content: |\n      net.ipv4.ip_forward=1\n    owner: root:root\n    permissions: '0644'\n\n  - path: /etc/nginx/sites-available/health-probe\n    content: |\n      server {\n          listen 8082;\n          server_name _;\n          location / {\n              return 200 'healthy';\n              add_header Content-Type text/plain;\n          }\n      }\n    owner: root:root\n    permissions: '0644'\n\n  - path: /opt/setup-iptables.sh\n    content: |\n      #!/bin/bash\n      set -e\n      IFACE=$(ip -o -4 route show to default | awk '{print $5}')\n      iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE\n      iptables -A FORWARD -i $IFACE -j ACCEPT\n      iptables -A FORWARD -o $IFACE -m state --state RELATED,ESTABLISHED -j ACCEPT\n      netfilter-persistent save\n    owner: root:root\n    permissions: '0755'\n\nruncmd:\n  - sysctl -p /etc/sysctl.d/99-ip-forward.conf\n  - ln -sf /etc/nginx/sites-available/health-probe /etc/nginx/sites-enabled/health-probe\n  - rm -f /etc/nginx/sites-enabled/default\n  - systemctl restart nginx\n  - systemctl enable nginx\n  - /opt/setup-iptables.sh\n"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/networkInterfaces",
+              "apiVersion": "2024-05-01",
+              "name": "[variables('nicName')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "enableIPForwarding": true,
+                "ipConfigurations": [
+                  {
+                    "name": "ipconfig1",
+                    "properties": {
+                      "privateIPAllocationMethod": "Dynamic",
+                      "subnet": {
+                        "id": "[parameters('subnetId')]"
+                      },
+                      "loadBalancerBackendAddressPools": [
+                        {
+                          "id": "[parameters('lbBackendPoolId')]"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Compute/virtualMachines",
+              "apiVersion": "2024-07-01",
+              "name": "[variables('vmName')]",
+              "location": "[parameters('location')]",
+              "zones": [
+                "[parameters('availabilityZone')]"
+              ],
+              "properties": {
+                "hardwareProfile": {
+                  "vmSize": "[parameters('vmSize')]"
+                },
+                "osProfile": {
+                  "computerName": "[variables('vmName')]",
+                  "adminUsername": "[parameters('adminUsername')]",
+                  "customData": "[base64(variables('cloudInitScript'))]",
+                  "linuxConfiguration": {
+                    "disablePasswordAuthentication": true,
+                    "ssh": {
+                      "publicKeys": [
+                        {
+                          "path": "[format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername'))]",
+                          "keyData": "[parameters('sshPublicKey')]"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "storageProfile": {
+                  "imageReference": {
+                    "publisher": "Canonical",
+                    "offer": "0001-com-ubuntu-server-jammy",
+                    "sku": "22_04-lts-gen2",
+                    "version": "latest"
+                  },
+                  "osDisk": {
+                    "createOption": "FromImage",
+                    "managedDisk": {
+                      "storageAccountType": "StandardSSD_LRS"
+                    }
+                  }
+                },
+                "networkProfile": {
+                  "networkInterfaces": [
+                    {
+                      "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]",
+                      "properties": {
+                        "primary": true
+                      }
+                    }
+                  ]
+                },
+                "diagnosticsProfile": {
+                  "bootDiagnostics": {
+                    "enabled": true
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "vmId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]"
+            },
+            "vmName": {
+              "type": "string",
+              "value": "[variables('vmName')]"
+            },
+            "vmPrivateIp": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/networkInterfaces', variables('nicName')), '2024-05-01').ipConfigurations[0].properties.privateIPAddress]"
+            },
+            "nicId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'deploy-loadbalancer')]",
+        "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks')]"
+      ]
+    },
+    {
+      "condition": "[parameters('deploySecondRouterVm')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-router-vm-02",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "subnetId": {
+            "value": "[reference(resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks'), '2024-05-01').subnets[1].id]"
+          },
+          "lbBackendPoolId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-loadbalancer'), '2025-04-01').outputs.backendPoolId.value]"
+          },
+          "adminUsername": {
+            "value": "[parameters('adminUsername')]"
+          },
+          "sshPublicKey": {
+            "value": "[parameters('sshPublicKey')]"
+          },
+          "vmSuffix": {
+            "value": "02"
+          },
+          "availabilityZone": {
+            "value": "2"
+          },
+          "vmSize": {
+            "value": "[parameters('vmSize')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.42.1.51946",
+              "templateHash": "16494112817780093260"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "subnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Backend subnet ID"
+              }
+            },
+            "lbBackendPoolId": {
+              "type": "string",
+              "metadata": {
+                "description": "Load Balancer backend pool ID"
+              }
+            },
+            "adminUsername": {
+              "type": "string",
+              "defaultValue": "azureuser",
+              "metadata": {
+                "description": "VM admin username"
+              }
+            },
+            "sshPublicKey": {
+              "type": "securestring",
+              "metadata": {
+                "description": "SSH public key"
+              }
+            },
+            "vmSuffix": {
+              "type": "string",
+              "defaultValue": "01",
+              "metadata": {
+                "description": "VM name suffix (e.g., 01, 02)"
+              }
+            },
+            "availabilityZone": {
+              "type": "string",
+              "defaultValue": "1",
+              "metadata": {
+                "description": "Availability zone"
+              }
+            },
+            "vmSize": {
+              "type": "string",
+              "defaultValue": "Standard_B2s",
+              "metadata": {
+                "description": "VM size"
+              }
+            }
+          },
+          "variables": {
+            "vmName": "[format('vm-router-{0}', parameters('vmSuffix'))]",
+            "nicName": "[format('{0}-nic', variables('vmName'))]",
+            "cloudInitScript": "#cloud-config\npackage_update: true\npackage_upgrade: true\n\npackages:\n  - nginx\n  - iptables-persistent\n  - net-tools\n  - tcpdump\n  - conntrack\n\nwrite_files:\n  - path: /etc/sysctl.d/99-ip-forward.conf\n    content: |\n      net.ipv4.ip_forward=1\n    owner: root:root\n    permissions: '0644'\n\n  - path: /etc/nginx/sites-available/health-probe\n    content: |\n      server {\n          listen 8082;\n          server_name _;\n          location / {\n              return 200 'healthy';\n              add_header Content-Type text/plain;\n          }\n      }\n    owner: root:root\n    permissions: '0644'\n\n  - path: /opt/setup-iptables.sh\n    content: |\n      #!/bin/bash\n      set -e\n      IFACE=$(ip -o -4 route show to default | awk '{print $5}')\n      iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE\n      iptables -A FORWARD -i $IFACE -j ACCEPT\n      iptables -A FORWARD -o $IFACE -m state --state RELATED,ESTABLISHED -j ACCEPT\n      netfilter-persistent save\n    owner: root:root\n    permissions: '0755'\n\nruncmd:\n  - sysctl -p /etc/sysctl.d/99-ip-forward.conf\n  - ln -sf /etc/nginx/sites-available/health-probe /etc/nginx/sites-enabled/health-probe\n  - rm -f /etc/nginx/sites-enabled/default\n  - systemctl restart nginx\n  - systemctl enable nginx\n  - /opt/setup-iptables.sh\n"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/networkInterfaces",
+              "apiVersion": "2024-05-01",
+              "name": "[variables('nicName')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "enableIPForwarding": true,
+                "ipConfigurations": [
+                  {
+                    "name": "ipconfig1",
+                    "properties": {
+                      "privateIPAllocationMethod": "Dynamic",
+                      "subnet": {
+                        "id": "[parameters('subnetId')]"
+                      },
+                      "loadBalancerBackendAddressPools": [
+                        {
+                          "id": "[parameters('lbBackendPoolId')]"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Compute/virtualMachines",
+              "apiVersion": "2024-07-01",
+              "name": "[variables('vmName')]",
+              "location": "[parameters('location')]",
+              "zones": [
+                "[parameters('availabilityZone')]"
+              ],
+              "properties": {
+                "hardwareProfile": {
+                  "vmSize": "[parameters('vmSize')]"
+                },
+                "osProfile": {
+                  "computerName": "[variables('vmName')]",
+                  "adminUsername": "[parameters('adminUsername')]",
+                  "customData": "[base64(variables('cloudInitScript'))]",
+                  "linuxConfiguration": {
+                    "disablePasswordAuthentication": true,
+                    "ssh": {
+                      "publicKeys": [
+                        {
+                          "path": "[format('/home/{0}/.ssh/authorized_keys', parameters('adminUsername'))]",
+                          "keyData": "[parameters('sshPublicKey')]"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "storageProfile": {
+                  "imageReference": {
+                    "publisher": "Canonical",
+                    "offer": "0001-com-ubuntu-server-jammy",
+                    "sku": "22_04-lts-gen2",
+                    "version": "latest"
+                  },
+                  "osDisk": {
+                    "createOption": "FromImage",
+                    "managedDisk": {
+                      "storageAccountType": "StandardSSD_LRS"
+                    }
+                  }
+                },
+                "networkProfile": {
+                  "networkInterfaces": [
+                    {
+                      "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]",
+                      "properties": {
+                        "primary": true
+                      }
+                    }
+                  ]
+                },
+                "diagnosticsProfile": {
+                  "bootDiagnostics": {
+                    "enabled": true
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "vmId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]"
+            },
+            "vmName": {
+              "type": "string",
+              "value": "[variables('vmName')]"
+            },
+            "vmPrivateIp": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Network/networkInterfaces', variables('nicName')), '2024-05-01').ipConfigurations[0].properties.privateIPAddress]"
+            },
+            "nicId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'deploy-loadbalancer')]",
+        "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-pls",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "lbFrontendIpConfigId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-loadbalancer'), '2025-04-01').outputs.frontendIpConfigId.value]"
+          },
+          "backendSubnetId": {
+            "value": "[reference(resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks'), '2024-05-01').subnets[1].id]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.42.1.51946",
+              "templateHash": "16609494562393818923"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "lbFrontendIpConfigId": {
+              "type": "string",
+              "metadata": {
+                "description": "Load Balancer Frontend IP Configuration ID"
+              }
+            },
+            "backendSubnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Backend subnet ID for Source NAT"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/privateLinkServices",
+              "apiVersion": "2024-05-01",
+              "name": "pls-databricks",
+              "location": "[parameters('location')]",
+              "properties": {
+                "loadBalancerFrontendIpConfigurations": [
+                  {
+                    "id": "[parameters('lbFrontendIpConfigId')]"
+                  }
+                ],
+                "ipConfigurations": [
+                  {
+                    "name": "pls-ipconfig",
+                    "properties": {
+                      "privateIPAllocationMethod": "Dynamic",
+                      "privateIPAddressVersion": "IPv4",
+                      "subnet": {
+                        "id": "[parameters('backendSubnetId')]"
+                      },
+                      "primary": true
+                    }
+                  }
+                ],
+                "visibility": {
+                  "subscriptions": []
+                },
+                "autoApproval": {
+                  "subscriptions": []
+                },
+                "enableProxyProtocol": false
+              }
+            }
+          ],
+          "outputs": {
+            "plsId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateLinkServices', 'pls-databricks')]"
+            },
+            "plsName": {
+              "type": "string",
+              "value": "pls-databricks"
+            },
+            "plsResourceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateLinkServices', 'pls-databricks')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'deploy-loadbalancer')]",
+        "[resourceId('Microsoft.Network/virtualNetworks', 'vnet-databricks')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-databricks",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "workspaceName": {
+            "value": "[parameters('databricksWorkspaceName')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.42.1.51946",
+              "templateHash": "6893330006498453673"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "workspaceName": {
+              "type": "string",
+              "defaultValue": "adb-serverless-test",
+              "metadata": {
+                "description": "Databricks workspace name"
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Databricks/workspaces",
+              "apiVersion": "2024-05-01",
+              "name": "[parameters('workspaceName')]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "premium"
+              },
+              "properties": {
+                "managedResourceGroupId": "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-databricks-{0}-managed', parameters('workspaceName')))]",
+                "parameters": {
+                  "enableNoPublicIp": {
+                    "value": false
+                  }
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "workspaceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Databricks/workspaces', parameters('workspaceName'))]"
+            },
+            "workspaceName": {
+              "type": "string",
+              "value": "[parameters('workspaceName')]"
+            },
+            "workspaceUrl": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Databricks/workspaces', parameters('workspaceName')), '2024-05-01').workspaceUrl]"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "firewallPrivateIp": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-firewall'), '2025-04-01').outputs.firewallPrivateIp.value]"
+    },
+    "firewallPublicIp": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-firewall'), '2025-04-01').outputs.firewallPublicIp.value]"
+    },
+    "plsResourceId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-pls'), '2025-04-01').outputs.plsResourceId.value]"
+    },
+    "plsName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-pls'), '2025-04-01').outputs.plsName.value]"
+    },
+    "routerVm1PrivateIp": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-router-vm-01'), '2025-04-01').outputs.vmPrivateIp.value]"
+    },
+    "routerVm2PrivateIp": {
+      "type": "string",
+      "value": "[if(parameters('deploySecondRouterVm'), reference(resourceId('Microsoft.Resources/deployments', 'deploy-router-vm-02'), '2025-04-01').outputs.vmPrivateIp.value, 'N/A')]"
+    },
+    "databricksWorkspaceUrl": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-databricks'), '2025-04-01').outputs.workspaceUrl.value]"
+    },
+    "databricksWorkspaceName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-databricks'), '2025-04-01').outputs.workspaceName.value]"
+    },
+    "logAnalyticsWorkspaceId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-firewall'), '2025-04-01').outputs.logAnalyticsWorkspaceId.value]"
+    },
+    "lbName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'deploy-loadbalancer'), '2025-04-01').outputs.lbName.value]"
+    }
+  }
+}
