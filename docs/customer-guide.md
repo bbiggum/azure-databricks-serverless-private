@@ -300,18 +300,13 @@ az network lb address-pool show \
 
 ### 3-4. Router VM (SNI Proxy)
 
-**확인 위치:** SSH 접속 (`ssh -p 2222 azureuser@20.249.61.72`, Firewall DNAT)
+**확인 위치:** SSH 접속
 
 **확인 내용:** NGINX SNI Proxy 로그, IPTables NAT 카운터, 외부 IP
 
 ```bash
 # 1. SNI Proxy 로그 실시간 감시 (★ 가장 중요)
 tail -f /var/log/nginx/sni-proxy-access.log
-
-# 노트북 실행 시 출력 예시:
-# 10.0.2.69 [29/Apr/2026:03:40:35 +0000] SNI=ifconfig.me upstream=34.117.59.81:443
-# 10.0.2.69 [29/Apr/2026:03:40:35 +0000] SNI=api.ipify.org upstream=64.185.227.155:443
-# 10.0.2.69 [29/Apr/2026:03:40:37 +0000] SNI=httpbin.org upstream=34.227.213.82:443
 ```
 
 ```bash
@@ -324,14 +319,6 @@ tcpdump -i eth0 port 443 -n -c 20
 
 # 4. VM 외부 IP 확인
 curl -s https://ifconfig.me/ip   # → 20.249.61.72
-```
-
-**`az vm run-command`로 원격 확인 (SSH 없이):**
-```bash
-az vm run-command invoke -g rg-databricks-networking -n vm-router-01 \
-  --command-id RunShellScript \
-  --scripts 'tail -20 /var/log/nginx/sni-proxy-access.log; echo "---"; iptables -t nat -L POSTROUTING -n -v' \
-  --query "value[0].message" -o tsv
 ```
 
 > **📸 스크린샷:**
@@ -373,14 +360,6 @@ AZFWApplicationRule
 | order by TimeGenerated desc
 ```
 
-**실제 로그 결과:**
-
-| Time (UTC) | Source IP | FQDN | Action |
-|------------|-----------|------|--------|
-| 03:40:35 | 10.0.2.68 | ifconfig.me | **Allow** |
-| 03:40:35 | 10.0.2.68 | api.ipify.org | **Allow** |
-| 03:40:37 | 10.0.2.68 | httpbin.org | **Allow** |
-
 **CLI로 확인:**
 ```bash
 az monitor log-analytics query \
@@ -420,10 +399,6 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 > ![NCC PE Rules](screenshots/09-ncc-pe-rules.png)
 >
 > *Account Console > Cloud resources > Network connectivity configurations > NCC > PE Rules — 상태 ESTABLISHED, 도메인 5개*
->
-> ![NCC Workspace 연결](screenshots/10-ncc-workspace-attach.png)
->
-> *Account Console > Workspaces > 대상 Workspace 선택 > Network connectivity configuration 연결 상태*
 
 ---
 
@@ -528,7 +503,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 >
 > **추가 ①: `libnginx-mod-stream` 패키지 설치**
 >
-> 원본 가이드 7.4절에서 NGINX를 Health Probe 용도(포트 8082)로만 설치합니다. SNI Proxy에는 NGINX Stream 모듈이 필요하므로 추가 설치합니다:
+> SNI Proxy에는 NGINX Stream 모듈이 필요하므로 추가 설치합니다:
 >
 > ```bash
 > sudo apt-get install -y libnginx-mod-stream
@@ -576,7 +551,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 >
 > **변경 전후 비교:**
 >
-> | 항목 | 원본 가이드 (7.3~7.4) | 추가 후 |
+> | 항목 | 이전 | 추가 후 |
 > |------|---------------------|---------|
 > | **패키지** | `nginx` | `nginx` + `libnginx-mod-stream` |
 > | **포트 8082** | Health Probe 응답 (HTTP) | 동일 (변경 없음) |
@@ -597,7 +572,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 ---
 
-## 6. IP 정리
+## 6. IP 정리 - 예시 상황에서의 설명으로 단순 참고용
 
 | IP | 설명 |
 |----|------|
