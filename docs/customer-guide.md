@@ -3,6 +3,7 @@
 ## 1. 개요
 
 Azure Databricks Serverless 컴퓨팅의 아웃바운드 트래픽을 고객 VNet의 Azure Firewall을 통해 라우팅하여 트래픽 흐름을 제어하고 IP를 고정하는 방법을 설명합니다.
+쉬운 이해를 위해서 실제 IP를 기재하였으며 실 환경에서는 차이가 발생할 수 있는 점 참고해 주세요.
 
 ### 트래픽 경로 분류
 
@@ -785,7 +786,7 @@ chmod +x scripts/cleanup.sh
 
 ## 9. 참고 자료
 
-- [Azure Databricks Serverless 네트워크 구성 가이드 (원본)](https://github.com/jiyongseong/azure-tips-and-tricks/blob/main/ADB/Networking/Azure_Databricks_Serverless_%EB%84%A4%ED%8A%B8%EC%9B%8C%ED%81%AC_%EA%B5%AC%EC%84%B1_%EA%B0%80%EC%9D%B4%EB%93%9C.md) — **본 가이드 섹션 5의 NGINX SNI Proxy 설정 필요**
+- [Azure Databricks Serverless 네트워크 구성 가이드 (원본)](https://github.com/jiyongseong/azure-tips-and-tricks/blob/main/ADB/Networking/Azure_Databricks_Serverless_%EB%84%A4%ED%8A%B8%EC%9B%8C%ED%81%AC_%EA%B5%AC%EC%84%B1_%EA%B0%80%EC%9D%B4%EB%93%9C.md)
 - [Securing Azure Databricks Serverless: Practical Guide to Private Link Integration](https://techcommunity.microsoft.com/blog/analyticsonazure/securing-azure-databricks-serverless-practical-guide-to-private-link-integration/4457083)
 - [Configure private connectivity to resources in your VNet](https://learn.microsoft.com/en-us/azure/databricks/security/network/serverless-network-security/pl-to-internal-network)
 - [Configure private connectivity to Azure resources](https://learn.microsoft.com/en-us/azure/databricks/security/network/serverless-network-security/serverless-private-link)
