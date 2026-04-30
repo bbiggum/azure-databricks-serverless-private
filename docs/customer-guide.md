@@ -25,35 +25,61 @@ Databricks Serverless에서 발생하는 아웃바운드 트래픽은 **NCC PE R
 
 PE에 등록되지 않은 나머지 트래픽은 기본적으로 제한 없이 인터넷에 접근합니다. 이 트래픽을 **Databricks 플랫폼 수준**에서 제어하려면 **Network Policy**를 사용합니다.
 
+> ⚠️ **중요:** Network Policy는 PE 미등록 트래픽뿐만 아니라 **NCC Resource PE를 통한 접근에도 적용**됩니다.
+> [공식 문서](https://learn.microsoft.com/en-us/azure/databricks/security/network/serverless-network-security/network-policies): *"Outbound access through private endpoints is also subject to the rules defined in the network policy."*
+
 ```
 [Serverless Compute 아웃바운드 요청]
     │
-    ├── NCC PE Rule에 등록된 도메인?
+    ├── Network Policy 평가 (FULL_ACCESS / RESTRICTED_ACCESS)
     │       │
-    │       ├── YES → PE → PLS → LB → VM → Firewall → Internet
-    │       │         (Firewall FQDN 규칙으로 허용/차단)
+    │       ├── FULL_ACCESS → 모든 아웃바운드 허용
     │       │
-    │       └── NO → Network Policy 적용
+    │       └── RESTRICTED_ACCESS → 아래 대상만 허용:
     │               │
-    │               ├── DENY_ALL + 허용 목록 → 등록된 도메인만 허용
+    │               ├── 1. Unity Catalog External Location (자동 허용)
+    │               │      → Storage PE (blob/dfs) = UC에 등록되어 있으면 자동 허용
     │               │
-    │               └── ALLOW_ALL (기본) → 자유롭게 인터넷 접근
-    │                   (기본 Serverless NAT 경유)
+    │               ├── 2. allowed_internet_destinations (명시적 FQDN)
+    │               │      → AI Search, Event Hub 등 UC 미지원 리소스의 FQDN
+    │               │
+    │               ├── 3. Workspace API (동일 워크스페이스)
+    │               │
+    │               └── 그 외 모든 대상 → ❌ 차단 (DNS 해석 포함)
+    │
+    ├── NCC PE Rule에 등록된 도메인? (DNS 해석 후)
+    │       │
+    │       ├── Domain PE → PLS → LB → VM → Firewall → Internet
+    │       │
+    │       └── Resource PE → Azure Backbone → PaaS 직접
+    │
+    └── PE 미등록 도메인 → Serverless NAT → Internet (FULL_ACCESS 시)
 ```
 
 | 제어 방식 | NCC PE + Firewall | Network Policy |
 |----------|------------------|----------------|
-| **제어 레벨** | 네트워크 인프라 (L4/L7) | Databricks 플랫폼 |
-| **적용 대상** | PE 등록 도메인 | PE 미등록 도메인 (나머지 전체) |
-| **제어 기능** | FQDN 허용/차단, 로깅, IP 고정 | FQDN/IP 허용/차단 |
-| **설정 위치** | NCC PE Rule + Azure Firewall Policy | Account Console > Cloud resources > Network connectivity configurations > NCC 선택 > **Network policies** 탭 |
-| **Firewall 경유** | ✅ | ❌ |
+| **제어 레벨** | 네트워크 인프라 (L4/L7) | Databricks 플랫폼 (DNS 수준) |
+| **적용 대상** | **PE를 통과하는 트래픽** | **PE 포함 모든 아웃바운드** |
+| **PE와의 관계** | PE 경로를 제공 | PE 접근 여부를 결정 (선행 조건) |
+| **RESTRICTED_ACCESS에서 자동 허용** | — | UC External Location, Workspace API |
+| **RESTRICTED_ACCESS에서 수동 허용 필요** | — | `allowed_internet_destinations`에 FQDN 추가 |
+| **설정 위치** | NCC PE Rule + Azure Firewall Policy | Account Console > Network policies |
+| **Firewall 경유** | ✅ (Domain PE만) | ❌ |
 | **로그** | Firewall Log Analytics | Databricks Audit Log |
 
+### RESTRICTED_ACCESS에서의 Resource PE 동작
+
+| 리소스 타입 | PE 상태 | UC 등록 | RESTRICTED_ACCESS | 추가 조치 |
+|---|---|---|---|---|
+| **Storage (blob/dfs)** | ESTABLISHED | ✅ UC External Location | ✅ 자동 허용 | 없음 |
+| **AI Search** | ESTABLISHED | ❌ UC 미지원 | ❌ DNS 차단 | `allowed_internet_destinations` + `DNS_NAME` |
+| **Event Hub** | ESTABLISHED | ❌ UC 미지원 | ❌ DNS 차단 | `allowed_internet_destinations` + `DNS_NAME` |
+| **SQL Database** | ESTABLISHED | ✅ UC 등록 가능 | ✅/❌ (UC 등록 여부) | UC 미등록 시 FQDN 추가 |
+
 > **권장 구성:**
-> - **보안이 중요한 도메인** (데이터 소스, API 등) → NCC PE Rule에 등록 → Firewall에서 FQDN 제어 + 로그 기록
-> - **나머지 인터넷 접근** → Network Policy를 `DENY_ALL` + 허용 목록으로 설정 → 플랫폼 수준 차단
-> - **설정 위치:** Account Console > **Cloud resources** > **Network connectivity configurations** > NCC 선택 > **Network policies** 탭
+> - **Storage** → NCC Resource PE + UC External Location → `RESTRICTED_ACCESS`에서 자동 허용
+> - **AI Search, Event Hub 등** → NCC Resource PE + `allowed_internet_destinations`에 FQDN(`DNS_NAME`) 추가
+> - **인터넷 도메인** (ifconfig.me, pypi.org 등) → NCC Domain PE + Firewall → `allowed_internet_destinations`에 FQDN 추가 또는 Domain PE의 `domain_names`가 자동 허용
 >
 > 참고: [What is serverless egress control?](https://learn.microsoft.com/en-us/azure/databricks/security/network/serverless-network-security/network-policies)
 
@@ -775,7 +801,80 @@ sudo tail -50 /var/log/nginx/sni-proxy-access.log
 
 ---
 
-## 8. 정리 (리소스 삭제)
+## 8. Network Policy + Resource PE 연동 시 주의사항
+
+> ### ⚠️ 중요: RESTRICTED_ACCESS에서 Resource PE도 Network Policy에 의해 제어됩니다
+>
+> [공식 문서](https://learn.microsoft.com/en-us/azure/databricks/security/network/serverless-network-security/network-policies)에 따르면:
+>
+> > **Policy enforcement for private endpoints**: Outbound access through private endpoints is **also subject to the rules defined in the network policy**. The destination must be listed either in Unity Catalog or within the policy.
+>
+> 즉, `RESTRICTED_ACCESS` 모드에서는 NCC Resource PE가 ESTABLISHED 상태라도 **Network Policy에서 허용되지 않으면 DNS 해석이 차단**됩니다.
+
+### 리소스 타입별 동작 차이
+
+| 리소스 | Resource PE | UC External Location | RESTRICTED_ACCESS | 추가 설정 필요 |
+|--------|:-:|:-:|:-:|---|
+| **Azure Storage** (blob/dfs) | ESTABLISHED | ✅ 등록됨 | ✅ 자동 허용 | 없음 (UC가 자동 허용) |
+| **Azure AI Search** | ESTABLISHED | ❌ UC 미지원 | ❌ **DNS 차단** | `allowed_internet_destinations`에 FQDN 추가 필요 |
+| **Azure SQL** | ESTABLISHED | ✅ UC 등록 가능 | ✅ 자동 허용 | UC External Location 등록 시 |
+
+**Storage가 자동 동작하는 이유**: Unity Catalog External Location에 등록된 Storage는 `RESTRICTED_ACCESS`에서 자동 허용됩니다.
+
+**AI Search가 차단되는 이유**: AI Search는 Unity Catalog에 등록할 수 없는 리소스 타입이므로, Network Policy의 `allowed_internet_destinations`에 명시적으로 FQDN을 추가해야 합니다.
+
+### 실험 결과 (검증 완료)
+
+| Network Policy | Storage PE (UC 등록) | AI Search PE (UC 미등록) |
+|---|---|---|
+| `FULL_ACCESS` | ✅ Private IP resolve | ✅ Private IP resolve |
+| `RESTRICTED_ACCESS` (FQDN 미추가) | ✅ 동작 | ❌ **DNS 실패** |
+| `RESTRICTED_ACCESS` + `allowed_internet_destinations` | ✅ 동작 | ✅ 동작 |
+
+### 해결: allowed_internet_destinations에 FQDN 추가
+
+```bash
+# Network Policy API로 AI Search FQDN 허용 추가
+curl -X PUT "https://accounts.azuredatabricks.net/api/2.0/accounts/{ACCOUNT_ID}/network-policies/{POLICY_ID}" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "network_policy_id": "{POLICY_ID}",
+    "account_id": "{ACCOUNT_ID}",
+    "egress": {
+      "network_access": {
+        "restriction_mode": "RESTRICTED_ACCESS",
+        "allowed_internet_destinations": [
+          {
+            "destination": "your-search-service.search.windows.net",
+            "internet_destination_type": "DNS_NAME"
+          }
+        ],
+        "policy_enforcement": {
+          "enforcement_mode": "ENFORCED"
+        }
+      }
+    }
+  }'
+```
+
+> **참고:** `internet_destination_type`은 **`DNS_NAME`**을 사용합니다 (`FQDN` 아님). 잘못된 타입을 사용하면 `INTERNET_DESTINATION_TYPE_UNSPECIFIED` 에러가 발생합니다.
+
+### 적용 대상
+
+이 동작은 **Unity Catalog에 등록할 수 없는 모든 Resource PE 대상**에 해당합니다:
+- Azure AI Search (`searchService`)
+- Azure Event Hub (`namespace`)
+- Azure Service Bus (`namespace`)
+- Azure Key Vault (`vault`)
+- Azure API Management
+- 기타 UC 미지원 리소스
+
+> **권장:** `RESTRICTED_ACCESS` 환경에서 Resource PE를 사용할 때는 **반드시 `allowed_internet_destinations`에 대상 FQDN을 추가**하세요. NCC PE Rule + Azure PE Connection + Network Policy 허용이 **모두 필요**합니다.
+
+---
+
+## 9. 정리 (리소스 삭제)
 
 ```bash
 chmod +x scripts/cleanup.sh
@@ -784,7 +883,7 @@ chmod +x scripts/cleanup.sh
 
 ---
 
-## 9. 참고 자료
+## 10. 참고 자료
 
 - [Azure Databricks Serverless 네트워크 구성 가이드 (원본)](https://github.com/jiyongseong/azure-tips-and-tricks/blob/main/ADB/Networking/Azure_Databricks_Serverless_%EB%84%A4%ED%8A%B8%EC%9B%8C%ED%81%AC_%EA%B5%AC%EC%84%B1_%EA%B0%80%EC%9D%B4%EB%93%9C.md)
 - [Securing Azure Databricks Serverless: Practical Guide to Private Link Integration](https://techcommunity.microsoft.com/blog/analyticsonazure/securing-azure-databricks-serverless-practical-guide-to-private-link-integration/4457083)
