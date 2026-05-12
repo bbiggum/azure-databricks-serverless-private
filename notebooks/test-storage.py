@@ -24,7 +24,6 @@
 # MAGIC
 # MAGIC ## 구성 요약
 # MAGIC | 구성 요소 | 값 |
-# MAGIC |---|---|
 # MAGIC | Storage Account | `adlsdbrickstest` (ADLS Gen2, HNS 활성화) |
 # MAGIC | Container | `testdata` |
 # MAGIC | 데이터 경로 | `sales/sample_sales.csv` |
