@@ -16,7 +16,17 @@
 | HTTPS 요청 | ❌ SSL handshake timeout (10초) | Proxy가 upstream에 연결 실패 |
 | SSL/TLS 핸드셰이크 | ❌ Timeout (10초) | upstream으로부터 ServerHello 응답 없음 |
 
-### 1.2 Proxy VM 로그
+### 1.2 IP 주소 정리
+
+| IP | 역할 | 설명 |
+|---|---|---|
+| `10.0.2.68` | Proxy VM (`vm-router-01`) | VM의 Private IP. NGINX → upstream 연결의 source IP |
+| `10.0.2.69` | PLS SNAT IP | Private Link Service가 `snet-lb-backend`에서 할당받은 SNAT IP. NGINX 로그의 `remote_addr`에 표시 |
+| `10.78.2.x` | DMZ 방화벽 | UDR의 Next Hop으로 설정된 Virtual Appliance IP |
+
+> **참고**: NGINX SNI Proxy 접근 로그에서 `remote_addr`로 표시되는 `10.0.2.69`는 Databricks의 원본 IP가 아닌 PLS의 SNAT IP입니다. DMZ 방화벽에서 트래픽을 확인할 때는 **`10.0.2.68`**(VM IP)을 source로 검색해야 합니다.
+
+### 1.3 Proxy VM 로그
 
 ```
 [12/May/2026:16:54:34 +0900] SNI=pypi.org upstream=151.101.64.223:443, 151.101.192.223:443, 
